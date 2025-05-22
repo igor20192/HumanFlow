@@ -161,6 +161,21 @@ class SiteAutomation(ABC):
 class SauceDemoAutomation(SiteAutomation):
     """Handles interactions with saucedemo.com for HumanFlow."""
 
+    # CSS selectors as class constants
+    LOGIN_USERNAME_SELECTOR = "#user-name"
+    LOGIN_PASSWORD_SELECTOR = "#password"
+    LOGIN_BUTTON_SELECTOR = "#login-button"
+    INVENTORY_LIST_SELECTOR = ".inventory_list"
+    PRODUCT_ITEM_SELECTOR = ".inventory_item"
+    PRODUCT_NAME_SELECTOR = ".inventory_item_name"
+    ADD_TO_CART_SELECTOR = ".btn_inventory"
+    CART_LINK_SELECTOR = ".shopping_cart_link"
+    CART_ITEM_SELECTOR = ".cart_item"
+    CART_ITEM_NAME_SELECTOR = ".inventory_item_name"
+    REMOVE_BUTTON_SELECTOR = ".btn_secondary"
+    MENU_BUTTON_SELECTOR = "#menu_button_container .bm-burger-button"
+    LOGOUT_LINK_SELECTOR = "#logout_sidebar_link"
+
     def __init__(self, context: BrowserContext):
         super().__init__(context)
         self.run_timestamp = time.strftime("%Y%m%d_%H%M")
@@ -181,17 +196,19 @@ class SauceDemoAutomation(SiteAutomation):
             raise ValueError("Credentials required for saucedemo.com")
         try:
             await UserBehaviorSimulator.human_like_type(
-                self.page, "#user-name", credentials.username
+                self.page, self.LOGIN_USERNAME_SELECTOR, credentials.username
             )
             await UserBehaviorSimulator.human_like_type(
-                self.page, "#password", credentials.password
+                self.page, self.LOGIN_PASSWORD_SELECTOR, credentials.password
             )
             await UserBehaviorSimulator.human_like_mouse_move(self.page, 500, 600)
-            await UserBehaviorSimulator.hover_over_element(self.page, "#login-button")
-            await self.page.click("#login-button")
+            await UserBehaviorSimulator.hover_over_element(
+                self.page, self.LOGIN_BUTTON_SELECTOR
+            )
+            await self.page.click(self.LOGIN_BUTTON_SELECTOR)
             await self.page.wait_for_load_state("networkidle")
             await self.page.wait_for_selector(
-                ".inventory_list", state="visible", timeout=20000
+                self.INVENTORY_LIST_SELECTOR, state="visible", timeout=20000
             )
             logger.info(f"Login successful, URL: {self.page.url}")
             await self.take_screenshot("after_login")
@@ -201,7 +218,7 @@ class SauceDemoAutomation(SiteAutomation):
 
     async def check_and_relogin(self, credentials: UserCredentials):
         """Checks for login page and re-logs in if detected."""
-        if await self.page.locator("#user-name").count() > 0:
+        if await self.page.locator(self.LOGIN_USERNAME_SELECTOR).count() > 0:
             logger.warning(
                 f"Login page detected at URL: {self.page.url}, attempting re-login"
             )
@@ -209,11 +226,121 @@ class SauceDemoAutomation(SiteAutomation):
             await self.login(credentials)
             await self.page.goto("https://www.saucedemo.com/inventory.html")
             await self.page.wait_for_selector(
-                ".inventory_list", state="visible", timeout=20000
+                self.INVENTORY_LIST_SELECTOR, state="visible", timeout=20000
             )
             logger.info(f"Re-login successful, URL: {self.page.url}")
             return True
         return False
+
+    async def _interact_with_products(
+        self, num_interactions: int, credentials: UserCredentials
+    ):
+        """Handles product interactions (view details, add to cart)."""
+        logger.info("Starting product interactions")
+        products = await self.page.locator(self.PRODUCT_ITEM_SELECTOR).all()
+        logger.info(f"Found {len(products)} products")
+        if not products:
+            logger.warning("No products found")
+            return
+        for i in range(num_interactions):
+            product = random.choice(products)
+            product_name = product.locator(self.PRODUCT_NAME_SELECTOR).first
+            if await product_name.count() == 0:
+                logger.warning("Product name locator not found")
+                name = "unknown"
+            else:
+                name = await product_name.inner_text()
+            logger.info(f"Selected product: {name}")
+            await UserBehaviorSimulator.hover_over_element(
+                self.page,
+                f"{self.PRODUCT_ITEM_SELECTOR} >> nth={products.index(product)}",
+            )
+            await product.locator(self.PRODUCT_NAME_SELECTOR).click()
+            await self.page.wait_for_url("**/inventory-item.html**", timeout=20000)
+            await self.page.wait_for_load_state("networkidle")
+            logger.info(
+                f"Navigated to product details page for {name}, URL: {self.page.url}"
+            )
+            await UserBehaviorSimulator.random_delay()
+            await UserBehaviorSimulator.hover_over_element(
+                self.page, self.ADD_TO_CART_SELECTOR
+            )
+            await self.page.click(self.ADD_TO_CART_SELECTOR)
+            logger.info(f"Added product '{name}' to cart")
+            await self.page.goto("https://www.saucedemo.com/inventory.html")
+            await self.page.wait_for_selector(
+                self.INVENTORY_LIST_SELECTOR, state="visible", timeout=20000
+            )
+            logger.info(f"Returned to inventory page, URL: {self.page.url}")
+            products = await self.page.locator(
+                self.PRODUCT_ITEM_SELECTOR
+            ).all()  # Refresh list
+        logger.info("Completed product interactions")
+
+    async def _navigate_to_cart(self, credentials: UserCredentials):
+        """Navigates to the cart page."""
+        logger.info("Starting cart navigation")
+        await self.check_and_relogin(credentials)
+        await self.page.wait_for_selector(
+            self.CART_LINK_SELECTOR, state="visible", timeout=20000
+        )
+        await UserBehaviorSimulator.hover_over_element(
+            self.page, self.CART_LINK_SELECTOR
+        )
+        await self.page.click(self.CART_LINK_SELECTOR)
+        await self.page.wait_for_load_state("networkidle")
+        logger.info(f"Navigated to cart, URL: {self.page.url}")
+        await self.take_screenshot("cart_view")
+        logger.info("Completed cart navigation")
+
+    async def _remove_cart_item(self):
+        """Removes a random item from the cart."""
+        logger.info("Starting cart item removal")
+        cart_items = await self.page.locator(self.CART_ITEM_SELECTOR).all()
+        if cart_items:
+            item = random.choice(cart_items)
+            item_name = item.locator(self.CART_ITEM_NAME_SELECTOR).first
+            if await item_name.count() == 0:
+                logger.warning("Cart item name locator not found")
+                name = "unknown"
+            else:
+                name = await item_name.inner_text()
+            logger.info(f"Selected cart item: {name}")
+            remove_button = item.locator(self.REMOVE_BUTTON_SELECTOR)
+            if await remove_button.count() != 1:
+                logger.error(
+                    f"Expected 1 remove button for cart item '{name}', found {await remove_button.count()}"
+                )
+                raise ValueError(
+                    f"Strict mode violation: remove button for cart item '{name}' resolved to {await remove_button.count()} elements"
+                )
+            await UserBehaviorSimulator.hover_over_element(self.page, remove_button)
+            await remove_button.click()
+            logger.info(f"Removed item '{name}' from cart")
+        else:
+            logger.info("No items in cart to remove")
+        logger.info("Completed cart item removal")
+
+    async def _logout(self, credentials: UserCredentials):
+        """Logs out of the site."""
+        logger.info("Starting logout")
+        await self.check_and_relogin(credentials)
+        await self.page.wait_for_selector(
+            self.MENU_BUTTON_SELECTOR, state="visible", timeout=20000
+        )
+        await UserBehaviorSimulator.hover_over_element(
+            self.page, self.MENU_BUTTON_SELECTOR
+        )
+        await self.page.click(self.MENU_BUTTON_SELECTOR)
+        await UserBehaviorSimulator.random_delay()
+        await UserBehaviorSimulator.hover_over_element(
+            self.page, self.LOGOUT_LINK_SELECTOR
+        )
+        await self.page.click(self.LOGOUT_LINK_SELECTOR)
+        await self.page.wait_for_load_state("networkidle")
+        logger.info(f"Logged out successfully, URL: {self.page.url}")
+        await self.take_screenshot("after_logout")
+        logger.info("Completed logout")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -227,129 +354,33 @@ class SauceDemoAutomation(SiteAutomation):
     ):
         if not credentials:
             raise ValueError("Credentials required for perform_actions")
-        try:
-            # Check for login page
-            await self.check_and_relogin(credentials)
-            # Verify we're on the inventory page
-            await self.page.wait_for_selector(
-                ".inventory_list", state="visible", timeout=20000
-            )
-            logger.info(f"On inventory page, URL: {self.page.url}")
-            await UserBehaviorSimulator.human_like_scroll(self.page)
-            # Interact with multiple products
-            products = await self.page.locator(".inventory_item").all()
-            logger.info(f"Found {len(products)} products")
-            if products:
-                num_interactions = (
-                    num_products
-                    if num_products is not None
-                    else random.randint(1, min(3, len(products)))
-                )
-                if num_interactions < 1 or num_interactions > len(products):
-                    logger.warning(
-                        f"Invalid num_products {num_interactions}, setting to {min(3, len(products))}"
-                    )
-                    num_interactions = min(3, len(products))
-                logger.info(f"Interacting with {num_interactions} products")
-                for i in range(num_interactions):
-                    product = random.choice(products)
-                    product_name = product.locator(".inventory_item_name").first
-                    if await product_name.count() == 0:
-                        logger.warning("Product name locator not found")
-                        name = "unknown"
-                    else:
-                        name = await product_name.inner_text()
-                    logger.info(f"Selected product: {name}")
-                    await UserBehaviorSimulator.hover_over_element(
-                        self.page, f".inventory_item >> nth={products.index(product)}"
-                    )
-                    await product.locator(".inventory_item_name").click()
-                    await self.page.wait_for_url(
-                        "**/inventory-item.html**", timeout=20000
-                    )
-                    await self.page.wait_for_load_state("networkidle")
-                    logger.info(
-                        f"Navigated to product details page for {name}, URL: {self.page.url}"
-                    )
-                    await UserBehaviorSimulator.random_delay()
-                    await UserBehaviorSimulator.hover_over_element(
-                        self.page, ".btn_inventory"
-                    )
-                    await self.page.click(".btn_inventory")
-                    logger.info(f"Added product '{name}' to cart")
-                    await self.page.goto("https://www.saucedemo.com/inventory.html")
-                    await self.page.wait_for_selector(
-                        ".inventory_list", state="visible", timeout=20000
-                    )
-                    logger.info(f"Returned to inventory page, URL: {self.page.url}")
-                    products = await self.page.locator(
-                        ".inventory_item"
-                    ).all()  # Refresh list
-            else:
-                logger.warning("No products found")
+        logger.info("Starting perform_actions")
+        await self.check_and_relogin(credentials)
+        await self.page.wait_for_selector(
+            self.INVENTORY_LIST_SELECTOR, state="visible", timeout=20000
+        )
+        logger.info(f"On inventory page, URL: {self.page.url}")
+        await UserBehaviorSimulator.human_like_scroll(self.page)
 
-            # Check for login page before cart
-            await self.check_and_relogin(credentials)
-            # Navigate to cart
-            await self.page.wait_for_selector(
-                ".shopping_cart_link", state="visible", timeout=20000
+        # Determine number of product interactions
+        products = await self.page.locator(self.PRODUCT_ITEM_SELECTOR).all()
+        num_interactions = (
+            num_products
+            if num_products is not None
+            else random.randint(1, min(3, len(products)))
+        )
+        if num_interactions < 1 or num_interactions > len(products):
+            logger.warning(
+                f"Invalid num_products {num_interactions}, setting to {min(3, len(products))}"
             )
-            await UserBehaviorSimulator.hover_over_element(
-                self.page, ".shopping_cart_link"
-            )
-            await self.page.click(".shopping_cart_link")
-            await self.page.wait_for_load_state("networkidle")
-            logger.info(f"Navigated to cart, URL: {self.page.url}")
-            await self.take_screenshot("cart_view")
+            num_interactions = min(3, len(products))
 
-            # Remove an item from cart
-            cart_items = await self.page.locator(".cart_item").all()
-            if cart_items:
-                item = random.choice(cart_items)
-                item_name = item.locator(".inventory_item_name").first
-                if await item_name.count() == 0:
-                    logger.warning("Cart item name locator not found")
-                    name = "unknown"
-                else:
-                    name = await item_name.inner_text()
-                logger.info(f"Selected cart item: {name}")
-                remove_button = item.locator(".btn_secondary")
-                if await remove_button.count() != 1:
-                    logger.error(
-                        f"Expected 1 remove button for cart item '{name}', found {await remove_button.count()}"
-                    )
-                    raise ValueError(
-                        f"Strict mode violation: remove button for cart item '{name}' resolved to {await remove_button.count()} elements"
-                    )
-                await UserBehaviorSimulator.hover_over_element(self.page, remove_button)
-                await remove_button.click()
-                logger.info(f"Removed item '{name}' from cart")
-            else:
-                logger.info("No items in cart to remove")
-
-            # Check for login page before logout
-            await self.check_and_relogin(credentials)
-            # Log out
-            await self.page.wait_for_selector(
-                "#menu_button_container .bm-burger-button",
-                state="visible",
-                timeout=20000,
-            )
-            await UserBehaviorSimulator.hover_over_element(
-                self.page, "#menu_button_container .bm-burger-button"
-            )
-            await self.page.click("#menu_button_container .bm-burger-button")
-            await UserBehaviorSimulator.random_delay()
-            await UserBehaviorSimulator.hover_over_element(
-                self.page, "#logout_sidebar_link"
-            )
-            await self.page.click("#logout_sidebar_link")
-            await self.page.wait_for_load_state("networkidle")
-            logger.info(f"Logged out successfully, URL: {self.page.url}")
-            await self.take_screenshot("after_logout")
-        except Exception as e:
-            logger.error(f"Action failed: {str(e)}, URL: {self.page.url}")
-            raise
+        # Execute actions
+        await self._interact_with_products(num_interactions, credentials)
+        await self._navigate_to_cart(credentials)
+        await self._remove_cart_item()
+        await self._logout(credentials)
+        logger.info("Completed perform_actions")
 
     async def take_screenshot(self, step: str):
         screenshot_dir = os.path.join("screens", self.run_timestamp)
@@ -357,6 +388,31 @@ class SauceDemoAutomation(SiteAutomation):
         screenshot_path = os.path.join(screenshot_dir, f"{step}.png")
         await self.page.screenshot(path=screenshot_path)
         logger.info(f"Screenshot saved to {screenshot_path}")
+
+
+def get_proxy_config(args):
+    """Configures proxy settings from CLI arguments or .env."""
+    if args.proxy:
+        proxy = {"server": args.proxy}
+        if args.proxy_username:
+            proxy["username"] = args.proxy_username
+        if args.proxy_password:
+            proxy["password"] = args.proxy_password
+        logger.info("Using proxy from command-line arguments")
+        return proxy
+
+    # Fallback to .env
+    env_proxy = {
+        "server": config("PROXY_SERVER_URL", default=""),
+        "username": config("PROXY_USERNAME", default=""),
+        "password": config("PROXY_PASSWORD", default=""),
+    }
+    if env_proxy["server"]:
+        logger.info("Using proxy from .env")
+        return env_proxy
+
+    logger.info("No proxy configured")
+    return None
 
 
 def parse_args():
@@ -383,27 +439,17 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    credentials = UserCredentials(username="standard_user", password="secret_sauce")
+
+    # Configure credentials
+    username = config("SAUCE_USERNAME", default="standard_user")
+    password = config("SAUCE_PASSWORD", default="secret_sauce")
+    credentials = UserCredentials(username=username, password=password)
 
     # Configure proxy
-    proxy = None
-    if args.proxy:
-        proxy = {"server": args.proxy}
-        if args.proxy_username:
-            proxy["username"] = args.proxy_username
-        if args.proxy_password:
-            proxy["password"] = args.proxy_password
-    else:
-        # Check .env for proxy settings as fallback
-        env_proxy = {
-            "server": config("PROXY_SERVER_URL", default=""),
-            "username": config("PROXY_USERNAME", default=""),
-            "password": config("PROXY_PASSWORD", default=""),
-        }
-        proxy = None if not env_proxy["server"] else env_proxy
+    proxy = get_proxy_config(args)
 
     logger.info(
-        f"Running with headless={args.headless}, num_products={args.num_products or 'random 1-3'}, proxy={proxy.get('server') if proxy else 'None'}"
+        f"Running with headless={args.headless}, num_products={args.num_products or 'random 1-3'}, proxy={proxy.get('server') if proxy else 'None'}, username={username}"
     )
 
     async with BrowserContextManager(headless=args.headless, proxy=proxy) as context:
