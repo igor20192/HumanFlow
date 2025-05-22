@@ -2,6 +2,8 @@ import asyncio
 import logging
 import random
 import time
+import os
+import argparse
 from abc import ABC, abstractmethod
 from playwright.async_api import async_playwright, Playwright, BrowserContext
 from dataclasses import dataclass
@@ -144,7 +146,11 @@ class SiteAutomation(ABC):
         pass
 
     @abstractmethod
-    async def perform_actions(self):
+    async def perform_actions(
+        self,
+        credentials: Optional[UserCredentials] = None,
+        num_products: Optional[int] = None,
+    ):
         pass
 
     @abstractmethod
@@ -154,6 +160,10 @@ class SiteAutomation(ABC):
 
 class SauceDemoAutomation(SiteAutomation):
     """Handles interactions with saucedemo.com for HumanFlow."""
+
+    def __init__(self, context: BrowserContext):
+        super().__init__(context)
+        self.run_timestamp = time.strftime("%Y%m%d_%H%M")
 
     async def setup(self):
         self.page = await self.context.new_page()
@@ -189,13 +199,37 @@ class SauceDemoAutomation(SiteAutomation):
             logger.error(f"Login failed: {str(e)}, URL: {self.page.url}")
             raise
 
+    async def check_and_relogin(self, credentials: UserCredentials):
+        """Checks for login page and re-logs in if detected."""
+        if await self.page.locator("#user-name").count() > 0:
+            logger.warning(
+                f"Login page detected at URL: {self.page.url}, attempting re-login"
+            )
+            await self.take_screenshot("relogin_attempt")
+            await self.login(credentials)
+            await self.page.goto("https://www.saucedemo.com/inventory.html")
+            await self.page.wait_for_selector(
+                ".inventory_list", state="visible", timeout=20000
+            )
+            logger.info(f"Re-login successful, URL: {self.page.url}")
+            return True
+        return False
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_fixed(2),
         retry=retry_if_exception_type((TimeoutError, Error)),
     )
-    async def perform_actions(self):
+    async def perform_actions(
+        self,
+        credentials: Optional[UserCredentials] = None,
+        num_products: Optional[int] = None,
+    ):
+        if not credentials:
+            raise ValueError("Credentials required for perform_actions")
         try:
+            # Check for login page
+            await self.check_and_relogin(credentials)
             # Verify we're on the inventory page
             await self.page.wait_for_selector(
                 ".inventory_list", state="visible", timeout=20000
@@ -206,7 +240,16 @@ class SauceDemoAutomation(SiteAutomation):
             products = await self.page.locator(".inventory_item").all()
             logger.info(f"Found {len(products)} products")
             if products:
-                num_interactions = random.randint(1, min(3, len(products)))
+                num_interactions = (
+                    num_products
+                    if num_products is not None
+                    else random.randint(1, min(3, len(products)))
+                )
+                if num_interactions < 1 or num_interactions > len(products):
+                    logger.warning(
+                        f"Invalid num_products {num_interactions}, setting to {min(3, len(products))}"
+                    )
+                    num_interactions = min(3, len(products))
                 logger.info(f"Interacting with {num_interactions} products")
                 for i in range(num_interactions):
                     product = random.choice(products)
@@ -245,6 +288,8 @@ class SauceDemoAutomation(SiteAutomation):
             else:
                 logger.warning("No products found")
 
+            # Check for login page before cart
+            await self.check_and_relogin(credentials)
             # Navigate to cart
             await self.page.wait_for_selector(
                 ".shopping_cart_link", state="visible", timeout=20000
@@ -282,6 +327,8 @@ class SauceDemoAutomation(SiteAutomation):
             else:
                 logger.info("No items in cart to remove")
 
+            # Check for login page before logout
+            await self.check_and_relogin(credentials)
             # Log out
             await self.page.wait_for_selector(
                 "#menu_button_container .bm-burger-button",
@@ -305,35 +352,73 @@ class SauceDemoAutomation(SiteAutomation):
             raise
 
     async def take_screenshot(self, step: str):
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        screenshot_path = f"screenshot_{step}_{timestamp}.png"
+        screenshot_dir = os.path.join("screens", self.run_timestamp)
+        os.makedirs(screenshot_dir, exist_ok=True)
+        screenshot_path = os.path.join(screenshot_dir, f"{step}.png")
         await self.page.screenshot(path=screenshot_path)
         logger.info(f"Screenshot saved to {screenshot_path}")
 
 
+def parse_args():
+    """Parse command-line arguments for HumanFlow."""
+    parser = argparse.ArgumentParser(
+        description="HumanFlow: Automate saucedemo.com with human-like behavior"
+    )
+    parser.add_argument(
+        "--headless", action="store_true", help="Run in headless mode (default: False)"
+    )
+    parser.add_argument(
+        "--num-products",
+        type=int,
+        help="Number of products to interact with (1-6, default: random 1-3)",
+    )
+    parser.add_argument(
+        "--proxy",
+        help="Proxy server URL (e.g., http://proxy:port or socks5://127.0.0.1:9050)",
+    )
+    parser.add_argument("--proxy-username", help="Proxy username (optional)")
+    parser.add_argument("--proxy-password", help="Proxy password (optional)")
+    return parser.parse_args()
+
+
 async def main():
+    args = parse_args()
     credentials = UserCredentials(username="standard_user", password="secret_sauce")
-    # Example proxy configuration (HTTP proxy) using environment variables
-    proxy = {
-        "server": config("PROXY_SERVER_URL", default=""),
-        "username": config("PROXY_USERNAME", default=""),
-        "password": config("PROXY_PASSWORD", default=""),
-    }
-    # Remove proxy settings if not configured
-    proxy = None if not proxy["server"] else proxy
-    # For Tor, ensure Tor is running locally (e.g., Tor Browser or tor service)
-    # proxy = {"server": "socks5://127.0.0.1:9050"}  # Tor default port
-    async with BrowserContextManager(headless=False, proxy=proxy) as context:
+
+    # Configure proxy
+    proxy = None
+    if args.proxy:
+        proxy = {"server": args.proxy}
+        if args.proxy_username:
+            proxy["username"] = args.proxy_username
+        if args.proxy_password:
+            proxy["password"] = args.proxy_password
+    else:
+        # Check .env for proxy settings as fallback
+        env_proxy = {
+            "server": config("PROXY_SERVER_URL", default=""),
+            "username": config("PROXY_USERNAME", default=""),
+            "password": config("PROXY_PASSWORD", default=""),
+        }
+        proxy = None if not env_proxy["server"] else env_proxy
+
+    logger.info(
+        f"Running with headless={args.headless}, num_products={args.num_products or 'random 1-3'}, proxy={proxy.get('server') if proxy else 'None'}"
+    )
+
+    async with BrowserContextManager(headless=args.headless, proxy=proxy) as context:
         automation = SauceDemoAutomation(context)
         try:
             await automation.setup()
             await automation.login(credentials)
-            await automation.perform_actions()
+            await automation.perform_actions(
+                credentials=credentials, num_products=args.num_products
+            )
+            logger.info("Script execution completed.")
         except Exception as e:
             logger.error(
                 f"Script execution failed: {str(e)}, URL: {automation.page.url if automation.page else 'unknown'}"
             )
-            # Take a screenshot on failure for debugging
             if automation.page:
                 await automation.take_screenshot("error")
             raise
@@ -341,4 +426,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    logger.info("Script execution completed.")
+    logging.shutdown()
