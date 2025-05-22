@@ -1,2 +1,6 @@
 .python-version
 .env
+*.log
+*.pyc
+__pycache__/
+screens/
